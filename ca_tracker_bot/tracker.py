@@ -5,14 +5,13 @@ from telegram.error import TelegramError
 
 # Configuration
 TOKEN = "8224822340:AAHBwPhk4i9K7jLVz_V-6z7zIVjGYhAdkeY"
-ADMIN_ID = 6715657025  # Your Telegram user ID
 
 # Pump.fun CA format (base58 encoded address ending with "pump")
 # Base58: includes 0-9 and letters, excluding 0, O, I, l
 CA_PATTERN = r'[1-9A-HJ-NP-Za-km-z]{32,44}pump'
 
 # In-memory storage (use database for persistence)
-tracked_users = {}  # {group_id: set(user_ids)}
+tracked_users = {}  # {group_id: {username: user_id_who_tracked}}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Start command"""
@@ -33,14 +32,15 @@ async def track_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     
     username = context.args[0].lstrip('@').lower()
     group_id = update.effective_chat.id
+    user_id = update.effective_user.id
     
     if group_id not in tracked_users:
-        tracked_users[group_id] = set()
+        tracked_users[group_id] = {}
     
-    tracked_users[group_id].add(username)
-    print(f"✅ Tracking @{username} in group {group_id}")
+    tracked_users[group_id][username] = user_id
+    print(f"✅ Tracking @{username} for user {user_id} in group {group_id}")
     print(f"Tracked users now: {tracked_users[group_id]}")
-    await update.message.reply_text(f"✅ Now tracking @{username}'s CAs")
+    await update.message.reply_text(f"✅ Now tracking @{username}'s CAs. Forwards go to your private chat!")
 
 async def untrack_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Stop tracking a user"""
@@ -52,7 +52,7 @@ async def untrack_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     group_id = update.effective_chat.id
     
     if group_id in tracked_users and username in tracked_users[group_id]:
-        tracked_users[group_id].remove(username)
+        del tracked_users[group_id][username]
         await update.message.reply_text(f"✅ Stopped tracking @{username}")
     else:
         await update.message.reply_text(f"❌ @{username} is not being tracked")
@@ -71,7 +71,7 @@ async def list_tracked(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle incoming messages and forward CAs from tracked users"""
     message = update.message
-    if not message.text:
+    if not message or not message.text:
         return
     
     group_id = message.chat.id
@@ -95,7 +95,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not cas:
         return
     
-    # Forward to admin's private chat
+    # Get the user ID who is tracking this person
+    user_id = tracked_users[group_id][username]
+    
+    # Forward to that user's private chat
     try:
         ca_list = "\n".join(f"• {ca}" for ca in cas)
         forward_text = (
@@ -103,8 +106,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             f"Contract Addresses:\n{ca_list}\n\n"
             f"Message: {message.text}"
         )
-        print(f"Attempting to send to {ADMIN_ID}: {forward_text}")
-        await context.bot.send_message(chat_id=ADMIN_ID, text=forward_text)
+        print(f"Attempting to send to {user_id}: {forward_text}")
+        await context.bot.send_message(chat_id=user_id, text=forward_text)
         print(f"✅ Message sent successfully!")
     except TelegramError as e:
         print(f"❌ Error forwarding message: {e}")

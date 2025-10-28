@@ -1,4 +1,6 @@
+
 import re
+import json
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.error import TelegramError
@@ -6,12 +8,66 @@ from telegram.error import TelegramError
 # Configuration
 TOKEN = "8224822340:AAHBwPhk4i9K7jLVz_V-6z7zIVjGYhAdkeY"
 
-# Pump.fun CA format (base58 encoded address ending with "pump")
-# Base58: includes 0-9 and letters, excluding 0, O, I, l
-CA_PATTERN = r'[1-9A-HJ-NP-Za-km-z]{32,44}pump'
+# Contract address patterns for different blockchains
+CA_PATTERNS = {
+    'Ethereum/BSC/Base/Polygon': r'0x[a-fA-F0-9]{40}',  # EVM chains
+    'Solana': r'[1-9A-HJ-NP-Za-km-z]{32,44}',  # Base58
+    'Tron': r'T[1-9A-HJ-NP-Za-km-z]{33}',  # Tron addresses start with T
+    'Sui': r'0x[a-fA-F0-9]{64}',  # Sui uses 64-char hex
+}
+
+def detect_blockchain(address):
+    """Detect which blockchain a CA belongs to"""
+    # Check Tron first (starts with T)
+    if re.match(CA_PATTERNS['Tron'], address):
+        return 'Tron', address
+    
+    # Check Sui (64-char hex)
+    if re.match(CA_PATTERNS['Sui'], address):
+        return 'Sui', address
+    
+    # Check EVM chains (40-char hex with 0x)
+    if re.match(CA_PATTERNS['Ethereum/BSC/Base/Polygon'], address):
+        return 'EVM (ETH/BSC/Base/Polygon)', address
+    
+    # Check Solana (base58, 32-44 chars)
+    if re.match(CA_PATTERNS['Solana'], address):
+        # Filter out common words that match the pattern
+        if len(address) >= 32 and not address.lower() in ['pump', 'moon', 'ape']:
+            return 'Solana', address
+    
+    return None, None
+
+# Storage file
+STORAGE_FILE = 'tracked_users.json'
 
 # In-memory storage (use database for persistence)
-tracked_users = {}  # {group_id: {username: user_id_who_tracked}}
+tracked_users = {}  # {group_id: {username: [user_ids_tracking]}}
+
+def load_tracked_users():
+    """Load tracked users from file"""
+    global tracked_users
+    try:
+        with open(STORAGE_FILE, 'r') as f:
+            # Convert string keys back to integers for group_ids
+            data = json.load(f)
+            tracked_users = {int(k): v for k, v in data.items()}
+            print(f"✅ Loaded {len(tracked_users)} groups from storage")
+    except FileNotFoundError:
+        print("ℹ️ No storage file found, starting fresh")
+        tracked_users = {}
+    except Exception as e:
+        print(f"❌ Error loading storage: {e}")
+        tracked_users = {}
+
+def save_tracked_users():
+    """Save tracked users to file"""
+    try:
+        with open(STORAGE_FILE, 'w') as f:
+            json.dump(tracked_users, f)
+        print("✅ Saved tracked users to storage")
+    except Exception as e:
+        print(f"❌ Error saving storage: {e}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Start command"""
@@ -37,10 +93,17 @@ async def track_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if group_id not in tracked_users:
         tracked_users[group_id] = {}
     
-    tracked_users[group_id][username] = user_id
-    print(f"✅ Tracking @{username} for user {user_id} in group {group_id}")
-    print(f"Tracked users now: {tracked_users[group_id]}")
-    await update.message.reply_text(f"✅ Now tracking @{username}'s CAs. Forwards go to your private chat!")
+    if username not in tracked_users[group_id]:
+        tracked_users[group_id][username] = []
+    
+    if user_id not in tracked_users[group_id][username]:
+        tracked_users[group_id][username].append(user_id)
+        save_tracked_users()
+        print(f"✅ User {user_id} tracking @{username} in group {group_id}")
+        print(f"Tracked users now: {tracked_users[group_id]}")
+        await update.message.reply_text(f"✅ Now tracking @{username}'s CAs. Forwards go to your private chat!")
+    else:
+        await update.message.reply_text(f"ℹ️ You're already tracking @{username}")
 
 async def untrack_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Stop tracking a user"""
@@ -50,10 +113,17 @@ async def untrack_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     
     username = context.args[0].lstrip('@').lower()
     group_id = update.effective_chat.id
+    user_id = update.effective_user.id
     
     if group_id in tracked_users and username in tracked_users[group_id]:
-        del tracked_users[group_id][username]
-        await update.message.reply_text(f"✅ Stopped tracking @{username}")
+        if user_id in tracked_users[group_id][username]:
+            tracked_users[group_id][username].remove(user_id)
+            if not tracked_users[group_id][username]:
+                del tracked_users[group_id][username]
+            save_tracked_users()
+            await update.message.reply_text(f"✅ Stopped tracking @{username}")
+        else:
+            await update.message.reply_text(f"❌ You're not tracking @{username}")
     else:
         await update.message.reply_text(f"❌ @{username} is not being tracked")
 
@@ -88,29 +158,41 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     
     # Search for contract addresses in message
     print(f"Searching in text: '{message.text}'")
-    print(f"Using pattern: {CA_PATTERN}")
-    cas = re.findall(CA_PATTERN, message.text)
-    print(f"CAs found: {cas}")
     
-    if not cas:
+    detected_cas = []
+    words = message.text.split()
+    
+    for word in words:
+        # Clean up the word (remove common punctuation)
+        clean_word = word.strip('.,!?()[]{}')
+        blockchain, ca = detect_blockchain(clean_word)
+        
+        if blockchain and ca:
+            detected_cas.append((blockchain, ca))
+            print(f"Found {blockchain} CA: {ca}")
+    
+    if not detected_cas:
+        print("No CAs found")
         return
     
-    # Get the user ID who is tracking this person
-    user_id = tracked_users[group_id][username]
+    # Get all user IDs tracking this person
+    user_ids = tracked_users[group_id][username]
     
-    # Forward to that user's private chat
-    try:
-        ca_list = "\n".join(f"• {ca}" for ca in cas)
-        forward_text = (
-            f"📌 New CA from @{username} in {message.chat.title}\n\n"
-            f"Contract Addresses:\n{ca_list}\n\n"
-            f"Message: {message.text}"
-        )
-        print(f"Attempting to send to {user_id}: {forward_text}")
-        await context.bot.send_message(chat_id=user_id, text=forward_text)
-        print(f"✅ Message sent successfully!")
-    except TelegramError as e:
-        print(f"❌ Error forwarding message: {e}")
+    # Forward to all users tracking this person
+    for user_id in user_ids:
+        try:
+            # Send info first
+            info_text = f"📌 New CA from @{username} in {message.chat.title}"
+            await context.bot.send_message(chat_id=user_id, text=info_text)
+            
+            # Send each CA with blockchain info
+            for blockchain, ca in detected_cas:
+                ca_text = f"🔗 {blockchain}\n\n{ca}"
+                await context.bot.send_message(chat_id=user_id, text=ca_text)
+            
+            print(f"✅ Message sent to {user_id} successfully!")
+        except TelegramError as e:
+            print(f"❌ Error forwarding to {user_id}: {e}")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Help command"""
@@ -118,6 +200,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 def main():
     """Start the bot"""
+    # Load tracked users from storage
+    load_tracked_users()
+    
     app = Application.builder().token(TOKEN).build()
     
     # Add handlers

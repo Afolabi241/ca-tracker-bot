@@ -303,9 +303,7 @@ def main():
     print("Bot started...")
     app.run_polling(
         allowed_updates=["message"],
-        drop_pending_updates=False,
-        timeout=30,
-        pool_timeout=30
+        drop_pending_updates=False
     )
 
 if __name__ == "__main__":

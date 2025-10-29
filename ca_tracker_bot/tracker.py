@@ -1,9 +1,10 @@
-
 import re
 import json
+import time
+import aiohttp
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from telegram.error import TelegramError
+from telegram.error import TelegramError, RetryAfter, TimedOut
 
 # Configuration
 TOKEN = "8224822340:AAHBwPhk4i9K7jLVz_V-6z7zIVjGYhAdkeY"
@@ -20,23 +21,61 @@ def detect_blockchain(address):
     """Detect which blockchain a CA belongs to"""
     # Check Tron first (starts with T)
     if re.match(CA_PATTERNS['Tron'], address):
-        return 'Tron', address
+        return 'tron', 'Tron', address
     
     # Check Sui (64-char hex)
     if re.match(CA_PATTERNS['Sui'], address):
-        return 'Sui', address
+        return 'sui', 'Sui', address
     
     # Check EVM chains (40-char hex with 0x)
     if re.match(CA_PATTERNS['Ethereum/BSC/Base/Polygon'], address):
-        return 'EVM (ETH/BSC/Base/Polygon)', address
+        return 'ethereum', 'EVM (ETH/BSC/Base/Polygon)', address
     
     # Check Solana (base58, 32-44 chars)
     if re.match(CA_PATTERNS['Solana'], address):
         # Filter out common words that match the pattern
         if len(address) >= 32 and not address.lower() in ['pump', 'moon', 'ape']:
-            return 'Solana', address
+            return 'solana', 'Solana', address
     
-    return None, None
+    return None, None, None
+
+async def get_token_info(chain_id, address):
+    """Fetch token info from DexScreener API"""
+    try:
+        url = f"https://api.dexscreener.com/latest/dex/tokens/{address}"
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    
+                    if data.get('pairs') and len(data['pairs']) > 0:
+                        # Get the most liquid pair
+                        pair = data['pairs'][0]
+                        
+                        name = pair.get('baseToken', {}).get('name', 'Unknown')
+                        symbol = pair.get('baseToken', {}).get('symbol', 'N/A')
+                        mcap = pair.get('marketCap', 0)
+                        
+                        # Format market cap
+                        if mcap >= 1_000_000:
+                            mcap_str = f"${mcap / 1_000_000:.2f}M"
+                        elif mcap >= 1_000:
+                            mcap_str = f"${mcap / 1_000:.2f}K"
+                        else:
+                            mcap_str = f"${mcap:.2f}"
+                        
+                        return {
+                            'name': name,
+                            'symbol': symbol,
+                            'mcap': mcap_str,
+                            'price': pair.get('priceUsd', 'N/A')
+                        }
+        
+        return None
+    except Exception as e:
+        print(f"Error fetching token info: {e}")
+        return None
 
 # Storage file
 STORAGE_FILE = 'tracked_users.json'
@@ -82,6 +121,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def track_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Track a user's contract addresses"""
+    # Only allow tracking in groups
+    if update.effective_chat.type == 'private':
+        await update.message.reply_text("❌ Please use this command in a group chat, not in DMs.")
+        return
+    
     if not context.args:
         await update.message.reply_text("❌ Usage: /track @username")
         return
@@ -107,6 +151,11 @@ async def track_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def untrack_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Stop tracking a user"""
+    # Only allow untracking in groups
+    if update.effective_chat.type == 'private':
+        await update.message.reply_text("❌ Please use this command in a group chat, not in DMs.")
+        return
+    
     if not context.args:
         await update.message.reply_text("❌ Usage: /untrack @username")
         return
@@ -129,6 +178,11 @@ async def untrack_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def list_tracked(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """List all tracked users in this group"""
+    # Only allow listing in groups
+    if update.effective_chat.type == 'private':
+        await update.message.reply_text("❌ Please use this command in a group chat, not in DMs.")
+        return
+    
     group_id = update.effective_chat.id
     
     if group_id not in tracked_users or not tracked_users[group_id]:
@@ -165,10 +219,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     for word in words:
         # Clean up the word (remove common punctuation)
         clean_word = word.strip('.,!?()[]{}')
-        blockchain, ca = detect_blockchain(clean_word)
+        chain_id, blockchain, ca = detect_blockchain(clean_word)
         
         if blockchain and ca:
-            detected_cas.append((blockchain, ca))
+            detected_cas.append((chain_id, blockchain, ca))
             print(f"Found {blockchain} CA: {ca}")
     
     if not detected_cas:
@@ -185,10 +239,42 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             info_text = f"📌 New CA from @{username} in {message.chat.title}"
             await context.bot.send_message(chat_id=user_id, text=info_text)
             
-            # Send each CA with blockchain info
-            for blockchain, ca in detected_cas:
-                ca_text = f"🔗 {blockchain}\n\n{ca}"
-                await context.bot.send_message(chat_id=user_id, text=ca_text)
+            # Send each CA with blockchain info and token details
+            for chain_id, blockchain, ca in detected_cas:
+                # Fetch token info
+                token_info = await get_token_info(chain_id, ca)
+                
+                if token_info:
+                    # Send token info first
+                    info_msg = (
+                        f"🔗 {blockchain}\n"
+                        f"💎 {token_info['name']} (${token_info['symbol']})\n"
+                        f"💰 Market Cap: {token_info['mcap']}"
+                    )
+                    await context.bot.send_message(chat_id=user_id, text=info_msg)
+                    
+                    # Send CA as separate message for easy copying
+                    await context.bot.send_message(chat_id=user_id, text=ca)
+                else:
+                    # If no token info, send blockchain + CA together
+                    await context.bot.send_message(chat_id=user_id, text=f"🔗 {blockchain}")
+                    await context.bot.send_message(chat_id=user_id, text=ca)
+                
+                # Retry logic for sending messages
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        await context.bot.send_message(chat_id=user_id, text=ca_text)
+                        break
+                    except RetryAfter as e:
+                        print(f"Rate limited, waiting {e.retry_after} seconds...")
+                        time.sleep(e.retry_after)
+                    except TimedOut:
+                        print(f"Timeout on attempt {attempt + 1}, retrying...")
+                        if attempt < max_retries - 1:
+                            time.sleep(2)
+                        else:
+                            raise
             
             print(f"✅ Message sent to {user_id} successfully!")
         except TelegramError as e:
@@ -213,9 +299,14 @@ def main():
     app.add_handler(CommandHandler("list", list_tracked))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    # Start bot
+    # Start bot with better error handling
     print("Bot started...")
-    app.run_polling()
+    app.run_polling(
+        allowed_updates=["message"],
+        drop_pending_updates=False,
+        timeout=30,
+        pool_timeout=30
+    )
 
 if __name__ == "__main__":
     main()

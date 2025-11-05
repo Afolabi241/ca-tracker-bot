@@ -1,49 +1,33 @@
-async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show hottest callers leaderboard"""
-    if not caller_stats:
-        await update.message.reply_text("📊 No calls tracked yet!\n\nStart tracking traders to see the leaderboard.")
-        return
-    
-    # Sort by success rate
-    sorted_callers = sorted(
-        caller_stats.items(),
-        key=lambda x: (x[1].get('profitable', 0) / max(x[1].get('calls', 1), 1), x[1].get('calls', 0)),
-        reverse=True
-    )[:10]  # Top 10
-    
-    text = "🔥 Hottest Callers Leaderboard\n\n"
-    
-    for i, (trader, stats) in enumerate(sorted_callers, 1):
-        calls = stats.get('calls', 0)
-        profitable = stats.get('profitable', 0)
-        win_rate = (profitable / calls * 100) if calls > 0 else 0
-        
-        medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
-        
-        text += f"{medal} @{trader}\n"
-        text += f"   Calls: {calls} | Win Rate: {win_rate:.1f}%\n\n"
-    
-    text += "\n💡 Track top performers with /track @username"
-    
-    await update.message.reply_text(text)
-
-def track_caller_performance(trader, profitable=False):
-    """Track performance of callers"""
-    if trader not in caller_stats:
-        caller_stats[trader] = {'calls': 0, 'profitable': 0, 'total_profit': 0.0}
-    
-    caller_stats[trader]['calls'] += 1
-    if profitable:
-        caller_stats[trader]['profitable'] += 1import re
+import re
 import json
 import time
+import os
 import aiohttp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from telegram.error import TelegramError, RetryAfter, TimedOut
+from cryptography.fernet import Fernet
 
 # Configuration
 TOKEN = "8224822340:AAHBwPhk4i9K7jLVz_V-6z7zIVjGYhAdkeY"
+
+# Encryption key (generate once and save securely!)
+ENCRYPTION_KEY = os.getenv('ENCRYPTION_KEY', Fernet.generate_key())
+
+# Storage files
+STORAGE_FILE = 'tracked_users.json'
+WALLETS_FILE = 'wallets.json'
+AUTOBUY_FILE = 'autobuy.json'
+
+# Global storage
+tracked_users = {}  # {group_id: {username: [user_ids_tracking]}}
+caller_stats = {}  # Track caller performance
+user_wallets = {}  # User wallet data
+autobuy_settings = {}  # Auto-buy configurations
+temp_autobuy_config = {}  # Temporary config during setup
+
+# Safety limits
+MAX_DAILY_TRADES = 100
 
 # Contract address patterns for different blockchains
 CA_PATTERNS = {
@@ -53,85 +37,71 @@ CA_PATTERNS = {
     'Sui': r'0x[a-fA-F0-9]{64}',  # Sui uses 64-char hex
 }
 
-def detect_blockchain(address):
-    """Detect which blockchain a CA belongs to"""
-    # Check Tron first (starts with T)
-    if re.match(CA_PATTERNS['Tron'], address):
-        return 'tron', 'Tron', address
-    
-    # Check Sui (64-char hex)
-    if re.match(CA_PATTERNS['Sui'], address):
-        return 'sui', 'Sui', address
-    
-    # Check EVM chains (40-char hex with 0x)
-    if re.match(CA_PATTERNS['Ethereum/BSC/Base/Polygon'], address):
-        return 'ethereum', 'EVM (ETH/BSC/Base/Polygon)', address
-    
-    # Check Solana (base58, 32-44 chars)
-    if re.match(CA_PATTERNS['Solana'], address):
-        # Filter out common words that match the pattern
-        if len(address) >= 32 and not address.lower() in ['pump', 'moon', 'ape']:
-            return 'solana', 'Solana', address
-    
-    return None, None, None
+# Wallet functions
+def generate_wallet():
+    """Generate a Solana wallet (placeholder - use actual Solana library)"""
+    # TODO: Use solana-py or solders to generate real wallet
+    import secrets
+    private_key = secrets.token_hex(32)
+    public_key = f"Sol{secrets.token_hex(20)}"
+    return private_key, public_key
 
-async def get_token_info(chain_id, address):
-    """Fetch token info from DexScreener API"""
+def encrypt_key(private_key):
+    """Encrypt private key"""
+    f = Fernet(ENCRYPTION_KEY)
+    return f.encrypt(private_key.encode()).decode()
+
+def save_wallets():
+    """Save wallets to file"""
     try:
-        url = f"https://api.dexscreener.com/latest/dex/tokens/{address}"
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    
-                    if data.get('pairs') and len(data['pairs']) > 0:
-                        # Get the most liquid pair
-                        pair = data['pairs'][0]
-                        
-                        name = pair.get('baseToken', {}).get('name', 'Unknown')
-                        symbol = pair.get('baseToken', {}).get('symbol', 'N/A')
-                        mcap = pair.get('marketCap', 0)
-                        
-                        # Format market cap
-                        if mcap >= 1_000_000:
-                            mcap_str = f"${mcap / 1_000_000:.2f}M"
-                        elif mcap >= 1_000:
-                            mcap_str = f"${mcap / 1_000:.2f}K"
-                        else:
-                            mcap_str = f"${mcap:.2f}"
-                        
-                        # Get token logo and chart
-                        logo_url = pair.get('info', {}).get('imageUrl', '')
-                        chart_url = f"https://dexscreener.com/{chain_id}/{pair.get('pairAddress', '')}"
-                        
-                        return {
-                            'name': name,
-                            'symbol': symbol,
-                            'mcap': mcap_str,
-                            'price': pair.get('priceUsd', 'N/A'),
-                            'logo': logo_url,
-                            'chart': chart_url,
-                            'pair_address': pair.get('pairAddress', '')
-                        }
-        
-        return None
+        with open(WALLETS_FILE, 'w') as f:
+            json.dump(user_wallets, f)
+        print("✅ Saved wallets to storage")
     except Exception as e:
-        print(f"Error fetching token info: {e}")
-        return None
+        print(f"❌ Error saving wallets: {e}")
 
-# Storage file
-STORAGE_FILE = 'tracked_users.json'
+def load_wallets():
+    """Load wallets from file"""
+    global user_wallets
+    try:
+        with open(WALLETS_FILE, 'r') as f:
+            user_wallets = json.load(f)
+        print(f"✅ Loaded {len(user_wallets)} wallets from storage")
+    except FileNotFoundError:
+        print("ℹ️ No wallets file found, starting fresh")
+        user_wallets = {}
+    except Exception as e:
+        print(f"❌ Error loading wallets: {e}")
+        user_wallets = {}
 
-# In-memory storage (use database for persistence)
-tracked_users = {}  # {group_id: {username: [user_ids_tracking]}}
+def save_autobuy_settings():
+    """Save autobuy settings"""
+    try:
+        with open(AUTOBUY_FILE, 'w') as f:
+            json.dump(autobuy_settings, f)
+        print("✅ Saved autobuy settings")
+    except Exception as e:
+        print(f"❌ Error saving autobuy: {e}")
+
+def load_autobuy_settings():
+    """Load autobuy settings"""
+    global autobuy_settings
+    try:
+        with open(AUTOBUY_FILE, 'r') as f:
+            autobuy_settings = json.load(f)
+        print(f"✅ Loaded autobuy settings for {len(autobuy_settings)} users")
+    except FileNotFoundError:
+        print("ℹ️ No autobuy file found, starting fresh")
+        autobuy_settings = {}
+    except Exception as e:
+        print(f"❌ Error loading autobuy: {e}")
+        autobuy_settings = {}
 
 def load_tracked_users():
     """Load tracked users from file"""
     global tracked_users
     try:
         with open(STORAGE_FILE, 'r') as f:
-            # Convert string keys back to integers for group_ids
             data = json.load(f)
             tracked_users = {int(k): v for k, v in data.items()}
             print(f"✅ Loaded {len(tracked_users)} groups from storage")
@@ -150,6 +120,102 @@ def save_tracked_users():
         print("✅ Saved tracked users to storage")
     except Exception as e:
         print(f"❌ Error saving storage: {e}")
+
+def detect_blockchain(address):
+    """Detect which blockchain a CA belongs to"""
+    if re.match(CA_PATTERNS['Tron'], address):
+        return 'tron', 'Tron', address
+    
+    if re.match(CA_PATTERNS['Sui'], address):
+        return 'sui', 'Sui', address
+    
+    if re.match(CA_PATTERNS['Ethereum/BSC/Base/Polygon'], address):
+        return 'ethereum', 'EVM (ETH/BSC/Base/Polygon)', address
+    
+    if re.match(CA_PATTERNS['Solana'], address):
+        if len(address) >= 32 and not address.lower() in ['pump', 'moon', 'ape']:
+            return 'solana', 'Solana', address
+    
+    return None, None, None
+
+async def get_token_info(chain_id, address):
+    """Fetch token info from DexScreener API"""
+    try:
+        url = f"https://api.dexscreener.com/latest/dex/tokens/{address}"
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    
+                    if data.get('pairs') and len(data['pairs']) > 0:
+                        pair = data['pairs'][0]
+                        
+                        name = pair.get('baseToken', {}).get('name', 'Unknown')
+                        symbol = pair.get('baseToken', {}).get('symbol', 'N/A')
+                        mcap = pair.get('marketCap', 0)
+                        
+                        if mcap >= 1_000_000:
+                            mcap_str = f"${mcap / 1_000_000:.2f}M"
+                        elif mcap >= 1_000:
+                            mcap_str = f"${mcap / 1_000:.2f}K"
+                        else:
+                            mcap_str = f"${mcap:.2f}"
+                        
+                        logo_url = pair.get('info', {}).get('imageUrl', '')
+                        chart_url = f"https://dexscreener.com/{chain_id}/{pair.get('pairAddress', '')}"
+                        
+                        return {
+                            'name': name,
+                            'symbol': symbol,
+                            'mcap': mcap_str,
+                            'price': pair.get('priceUsd', 'N/A'),
+                            'logo': logo_url,
+                            'chart': chart_url,
+                            'pair_address': pair.get('pairAddress', '')
+                        }
+        
+        return None
+    except Exception as e:
+        print(f"Error fetching token info: {e}")
+        return None
+
+def track_caller_performance(trader, profitable=False):
+    """Track performance of callers"""
+    if trader not in caller_stats:
+        caller_stats[trader] = {'calls': 0, 'profitable': 0, 'total_profit': 0.0}
+    
+    caller_stats[trader]['calls'] += 1
+    if profitable:
+        caller_stats[trader]['profitable'] += 1
+
+async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show hottest callers leaderboard"""
+    if not caller_stats:
+        await update.message.reply_text("📊 No calls tracked yet!\n\nStart tracking traders to see the leaderboard.")
+        return
+    
+    sorted_callers = sorted(
+        caller_stats.items(),
+        key=lambda x: (x[1].get('profitable', 0) / max(x[1].get('calls', 1), 1), x[1].get('calls', 0)),
+        reverse=True
+    )[:10]
+    
+    text = "🔥 Hottest Callers Leaderboard\n\n"
+    
+    for i, (trader, stats) in enumerate(sorted_callers, 1):
+        calls = stats.get('calls', 0)
+        profitable = stats.get('profitable', 0)
+        win_rate = (profitable / calls * 100) if calls > 0 else 0
+        
+        medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
+        
+        text += f"{medal} @{trader}\n"
+        text += f"   Calls: {calls} | Win Rate: {win_rate:.1f}%\n\n"
+    
+    text += "\n💡 Track top performers with /track @username"
+    
+    await update.message.reply_text(text)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Start command - Show main menu"""
@@ -197,8 +263,187 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     user_id = str(update.effective_user.id)
     
     if action == 'wallet':
-        # Show wallet
-        if user_id not in user_wallets:
+        if user_id not in tracked_users[group_id][target]:
+        tracked_users[group_id][target].append(user_id)
+        save_tracked_users()
+        print(f"✅ User {user_id} tracking @{target} in group {group_id}")
+        print(f"Tracked users now: {tracked_users[group_id]}")
+        await update.message.reply_text(f"✅ Now tracking @{target}'s CAs. Forwards go to your private chat!")
+    else:
+        await update.message.reply_text(f"ℹ️ You're already tracking @{target}")
+
+async def untrack_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Stop tracking a user"""
+    if update.effective_chat.type == 'private':
+        await update.message.reply_text("❌ Please use this command in a group chat, not in DMs.")
+        return
+    
+    if not context.args:
+        await update.message.reply_text("❌ Usage: /untrack @username")
+        return
+    
+    username = context.args[0].lstrip('@').lower()
+    group_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    
+    if group_id in tracked_users and username in tracked_users[group_id]:
+        if user_id in tracked_users[group_id][username]:
+            tracked_users[group_id][username].remove(user_id)
+            if not tracked_users[group_id][username]:
+                del tracked_users[group_id][username]
+            save_tracked_users()
+            await update.message.reply_text(f"✅ Stopped tracking @{username}")
+        else:
+            await update.message.reply_text(f"❌ You're not tracking @{username}")
+    else:
+        await update.message.reply_text(f"❌ @{username} is not being tracked")
+
+async def list_tracked(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """List all tracked users in this group"""
+    if update.effective_chat.type == 'private':
+        await update.message.reply_text("❌ Please use this command in a group chat, not in DMs.")
+        return
+    
+    group_id = update.effective_chat.id
+    
+    if group_id not in tracked_users or not tracked_users[group_id]:
+        await update.message.reply_text("📭 No users are being tracked in this group")
+        return
+    
+    user_list = "\n".join(f"• @{user}" for user in tracked_users[group_id])
+    await update.message.reply_text(f"📋 Tracked users:\n{user_list}")
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle incoming messages and forward CAs from tracked users"""
+    message = update.message
+    if not message or not message.text:
+        return
+    
+    group_id = message.chat.id
+    
+    if message.from_user:
+        username = message.from_user.username.lower() if message.from_user.username else None
+    elif message.sender_chat:
+        username = message.sender_chat.username.lower() if message.sender_chat.username else message.sender_chat.title.lower()
+    else:
+        return
+    
+    print(f"Message from @{username}: {message.text}")
+    print(f"Tracked users in group {group_id}: {tracked_users.get(group_id, set())}")
+    
+    if group_id not in tracked_users or username not in tracked_users[group_id]:
+        print(f"User @{username} not being tracked")
+        return
+    
+    print(f"Searching in text: '{message.text}'")
+    
+    detected_cas = []
+    words = message.text.split()
+    
+    for word in words:
+        clean_word = word.strip('.,!?()[]{}')
+        chain_id, blockchain, ca = detect_blockchain(clean_word)
+        
+        if blockchain and ca:
+            detected_cas.append((chain_id, blockchain, ca))
+            print(f"Found {blockchain} CA: {ca}")
+    
+    if not detected_cas:
+        print("No CAs found")
+        return
+    
+    user_ids = tracked_users[group_id][username]
+    
+    for user_id in user_ids:
+        try:
+            info_text = f"📌 New CA from @{username} in {message.chat.title}"
+            await context.bot.send_message(chat_id=user_id, text=info_text)
+            
+            for chain_id, blockchain, ca in detected_cas:
+                token_info = await get_token_info(chain_id, ca)
+                
+                track_caller_performance(username)
+                
+                if token_info:
+                    if token_info.get('logo'):
+                        try:
+                            await context.bot.send_photo(
+                                chat_id=user_id,
+                                photo=token_info['logo'],
+                                caption=f"🔗 {blockchain}\n💎 {token_info['name']} (${token_info['symbol']})\n💰 Mcap: {token_info['mcap']}"
+                            )
+                        except:
+                            info_msg = (
+                                f"🔗 {blockchain}\n"
+                                f"💎 {token_info['name']} (${token_info['symbol']})\n"
+                                f"💰 Mcap: {token_info['mcap']}"
+                            )
+                            await context.bot.send_message(chat_id=user_id, text=info_msg)
+                    else:
+                        info_msg = (
+                            f"🔗 {blockchain}\n"
+                            f"💎 {token_info['name']} (${token_info['symbol']})\n"
+                            f"💰 Mcap: {token_info['mcap']}"
+                        )
+                        await context.bot.send_message(chat_id=user_id, text=info_msg)
+                    
+                    await context.bot.send_message(chat_id=user_id, text=ca)
+                    
+                    if token_info.get('chart'):
+                        await context.bot.send_message(
+                            chat_id=user_id,
+                            text=f"📊 [View Chart]({token_info['chart']})",
+                            parse_mode='Markdown'
+                        )
+                else:
+                    await context.bot.send_message(chat_id=user_id, text=f"🔗 {blockchain}")
+                    await context.bot.send_message(chat_id=user_id, text=ca)
+            
+            print(f"✅ Message sent to {user_id} successfully!")
+        except RetryAfter as e:
+            print(f"Rate limited, waiting {e.retry_after} seconds...")
+            time.sleep(e.retry_after)
+        except TimedOut:
+            print(f"Timeout, retrying...")
+            time.sleep(2)
+        except TelegramError as e:
+            print(f"❌ Error forwarding to {user_id}: {e}")
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Help command"""
+    await start(update, context)
+
+def main():
+    """Start the bot"""
+    load_tracked_users()
+    load_wallets()
+    load_autobuy_settings()
+    
+    app = Application.builder().token(TOKEN).build()
+    
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("track", track_user))
+    app.add_handler(CommandHandler("untrack", untrack_user))
+    app.add_handler(CommandHandler("list", list_tracked))
+    app.add_handler(CommandHandler("wallet", wallet))
+    app.add_handler(CommandHandler("balance", balance))
+    app.add_handler(CommandHandler("autobuy", autobuy_command))
+    app.add_handler(CommandHandler("leaderboard", leaderboard_command))
+    app.add_handler(CallbackQueryHandler(handle_menu_callback, pattern="^menu_"))
+    app.add_handler(CallbackQueryHandler(handle_autobuy_callback, pattern="^ab_"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    print("Bot started...")
+    print(f"⚠️  ENCRYPTION KEY: {ENCRYPTION_KEY.decode() if isinstance(ENCRYPTION_KEY, bytes) else ENCRYPTION_KEY}")
+    print("⚠️  SAVE THIS KEY! Without it, you cannot recover wallets!")
+    app.run_polling(
+        allowed_updates=["message"],
+        drop_pending_updates=False
+    )
+
+if __name__ == "__main__":
+    main()id not in user_wallets:
             private_key, public_key = generate_wallet()
             encrypted_key = encrypt_key(private_key)
             
@@ -243,7 +488,6 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         )
     
     elif action == 'autobuy':
-        # Show tracked users to configure auto-buy
         if user_id not in autobuy_settings or not autobuy_settings[user_id]:
             await query.edit_message_text(
                 "🎯 Auto-Buy Settings\n\n"
@@ -255,7 +499,6 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             return
         
-        # Show list of configured auto-buys
         text = "🎯 Your Auto-Buy Settings\n\n"
         buttons = []
         
@@ -321,7 +564,6 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         )
     
     elif action == 'back':
-        # Return to main menu
         await start_menu_edit(query)
 
 async def start_menu_edit(query):
@@ -354,7 +596,6 @@ async def wallet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Get user's deposit wallet"""
     user_id = str(update.effective_user.id)
     
-    # Create wallet if doesn't exist
     if user_id not in user_wallets:
         private_key, public_key = generate_wallet()
         encrypted_key = encrypt_key(private_key)
@@ -387,7 +628,6 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("❌ You don't have a wallet yet. Use /wallet to create one.")
         return
     
-    # TODO: Check actual on-chain balance
     balance = user_wallets[user_id].get('balance', 0.0)
     address = user_wallets[user_id]['address']
     
@@ -411,7 +651,6 @@ async def autobuy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
     
-    # List auto-buy settings
     if context.args[0].lower() == 'list':
         if user_id not in autobuy_settings or not autobuy_settings[user_id]:
             await update.message.reply_text("📭 No auto-buy settings configured.")
@@ -430,7 +669,6 @@ async def autobuy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text(settings_text)
         return
     
-    # Disable auto-buy
     if context.args[0].lower() == 'off' and len(context.args) >= 2:
         trader = context.args[1].lstrip('@').lower()
         
@@ -442,15 +680,12 @@ async def autobuy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await update.message.reply_text(f"❌ No auto-buy settings found for @{trader}")
         return
     
-    # Start button-based configuration
     trader = context.args[0].lstrip('@').lower()
     
-    # Check if user has wallet
     if user_id not in user_wallets:
         await update.message.reply_text("❌ Create a wallet first with /wallet")
         return
     
-    # Initialize temp config
     temp_autobuy_config[user_id] = {
         'trader': trader,
         'amount': 0.5,
@@ -459,7 +694,6 @@ async def autobuy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         'takeprofit': 100
     }
     
-    # Show configuration buttons
     await show_autobuy_menu(update, user_id)
 
 async def show_autobuy_menu(update, user_id):
@@ -482,31 +716,26 @@ async def show_autobuy_menu(update, user_id):
     )
     
     keyboard = [
-        # Amount row
         [
             InlineKeyboardButton("💰 0.1 SOL", callback_data=f"ab_amount_0.1_{user_id}"),
             InlineKeyboardButton("💰 0.5 SOL", callback_data=f"ab_amount_0.5_{user_id}"),
             InlineKeyboardButton("💰 1.0 SOL", callback_data=f"ab_amount_1.0_{user_id}")
         ],
-        # Max Mcap row
         [
             InlineKeyboardButton("📊 $50K", callback_data=f"ab_mcap_50000_{user_id}"),
             InlineKeyboardButton("📊 $100K", callback_data=f"ab_mcap_100000_{user_id}"),
             InlineKeyboardButton("📊 $500K", callback_data=f"ab_mcap_500000_{user_id}")
         ],
-        # Stop Loss row
         [
             InlineKeyboardButton("🔻 10%", callback_data=f"ab_sl_10_{user_id}"),
             InlineKeyboardButton("🔻 20%", callback_data=f"ab_sl_20_{user_id}"),
             InlineKeyboardButton("🔻 50%", callback_data=f"ab_sl_50_{user_id}")
         ],
-        # Take Profit row
         [
             InlineKeyboardButton("🔺 50%", callback_data=f"ab_tp_50_{user_id}"),
             InlineKeyboardButton("🔺 100%", callback_data=f"ab_tp_100_{user_id}"),
             InlineKeyboardButton("🔺 200%", callback_data=f"ab_tp_200_{user_id}")
         ],
-        # Confirm/Cancel row
         [
             InlineKeyboardButton("✅ Confirm", callback_data=f"ab_confirm_{user_id}"),
             InlineKeyboardButton("❌ Cancel", callback_data=f"ab_cancel_{user_id}")
@@ -535,7 +764,6 @@ async def handle_autobuy_callback(update: Update, context: ContextTypes.DEFAULT_
     value = parts[2]
     user_id = parts[3] if len(parts) > 3 else str(update.effective_user.id)
     
-    # Verify user matches
     if user_id != str(update.effective_user.id):
         await query.answer("❌ This isn't your menu!", show_alert=True)
         return
@@ -544,7 +772,6 @@ async def handle_autobuy_callback(update: Update, context: ContextTypes.DEFAULT_
         await query.answer("❌ Configuration expired. Run /autobuy again", show_alert=True)
         return
     
-    # Update config based on button pressed
     if action == 'amount':
         temp_autobuy_config[user_id]['amount'] = float(value)
     elif action == 'mcap':
@@ -554,7 +781,6 @@ async def handle_autobuy_callback(update: Update, context: ContextTypes.DEFAULT_
     elif action == 'tp':
         temp_autobuy_config[user_id]['takeprofit'] = int(value)
     elif action == 'confirm':
-        # Save settings
         config = temp_autobuy_config[user_id]
         trader = config['trader']
         
@@ -589,12 +815,10 @@ async def handle_autobuy_callback(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text("❌ Auto-buy configuration cancelled.")
         return
     
-    # Refresh menu with updated values
     await show_autobuy_menu(update, user_id)
 
 async def track_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Track a user's or channel's contract addresses"""
-    # Only allow tracking in groups
     if update.effective_chat.type == 'private':
         await update.message.reply_text("❌ Please use this command in a group chat, not in DMs.")
         return
@@ -613,217 +837,4 @@ async def track_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if target not in tracked_users[group_id]:
         tracked_users[group_id][target] = []
     
-    if user_id not in tracked_users[group_id][target]:
-        tracked_users[group_id][target].append(user_id)
-        save_tracked_users()
-        print(f"✅ User {user_id} tracking @{target} in group {group_id}")
-        print(f"Tracked users now: {tracked_users[group_id]}")
-        await update.message.reply_text(f"✅ Now tracking @{target}'s CAs. Forwards go to your private chat!")
-    else:
-        await update.message.reply_text(f"ℹ️ You're already tracking @{target}")
-
-async def untrack_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Stop tracking a user"""
-    # Only allow untracking in groups
-    if update.effective_chat.type == 'private':
-        await update.message.reply_text("❌ Please use this command in a group chat, not in DMs.")
-        return
-    
-    if not context.args:
-        await update.message.reply_text("❌ Usage: /untrack @username")
-        return
-    
-    username = context.args[0].lstrip('@').lower()
-    group_id = update.effective_chat.id
-    user_id = update.effective_user.id
-    
-    if group_id in tracked_users and username in tracked_users[group_id]:
-        if user_id in tracked_users[group_id][username]:
-            tracked_users[group_id][username].remove(user_id)
-            if not tracked_users[group_id][username]:
-                del tracked_users[group_id][username]
-            save_tracked_users()
-            await update.message.reply_text(f"✅ Stopped tracking @{username}")
-        else:
-            await update.message.reply_text(f"❌ You're not tracking @{username}")
-    else:
-        await update.message.reply_text(f"❌ @{username} is not being tracked")
-
-async def list_tracked(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """List all tracked users in this group"""
-    # Only allow listing in groups
-    if update.effective_chat.type == 'private':
-        await update.message.reply_text("❌ Please use this command in a group chat, not in DMs.")
-        return
-    
-    group_id = update.effective_chat.id
-    
-    if group_id not in tracked_users or not tracked_users[group_id]:
-        await update.message.reply_text("📭 No users are being tracked in this group")
-        return
-    
-    user_list = "\n".join(f"• @{user}" for user in tracked_users[group_id])
-    await update.message.reply_text(f"📋 Tracked users:\n{user_list}")
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle incoming messages and forward CAs from tracked users"""
-    message = update.message
-    if not message or not message.text:
-        return
-    
-    group_id = message.chat.id
-    
-    # Get username or channel name
-    if message.from_user:
-        username = message.from_user.username.lower() if message.from_user.username else None
-    elif message.sender_chat:
-        # This is a channel message
-        username = message.sender_chat.username.lower() if message.sender_chat.username else message.sender_chat.title.lower()
-    else:
-        return
-    
-    # Debug: print incoming messages
-    print(f"Message from @{username}: {message.text}")
-    print(f"Tracked users in group {group_id}: {tracked_users.get(group_id, set())}")
-    
-    # Check if user is tracked
-    if group_id not in tracked_users or username not in tracked_users[group_id]:
-        print(f"User @{username} not being tracked")
-        return
-    
-    # Search for contract addresses in message
-    print(f"Searching in text: '{message.text}'")
-    
-    detected_cas = []
-    words = message.text.split()
-    
-    for word in words:
-        # Clean up the word (remove common punctuation)
-        clean_word = word.strip('.,!?()[]{}')
-        chain_id, blockchain, ca = detect_blockchain(clean_word)
-        
-        if blockchain and ca:
-            detected_cas.append((chain_id, blockchain, ca))
-            print(f"Found {blockchain} CA: {ca}")
-    
-    if not detected_cas:
-        print("No CAs found")
-        return
-    
-    # Get all user IDs tracking this person
-    user_ids = tracked_users[group_id][username]
-    
-    # Forward to all users tracking this person
-    for user_id in user_ids:
-        try:
-            # Send info first
-            info_text = f"📌 New CA from @{username} in {message.chat.title}"
-            await context.bot.send_message(chat_id=user_id, text=info_text)
-            
-            # Send each CA with blockchain info and token details
-            for chain_id, blockchain, ca in detected_cas:
-                # Fetch token info
-                token_info = await get_token_info(chain_id, ca)
-                
-                # Track caller
-                track_caller_performance(username)
-                
-                if token_info:
-                    # Send token logo if available
-                    if token_info.get('logo'):
-                        try:
-                            await context.bot.send_photo(
-                                chat_id=user_id,
-                                photo=token_info['logo'],
-                                caption=f"🔗 {blockchain}\n💎 {token_info['name']} (${token_info['symbol']})\n💰 Mcap: {token_info['mcap']}"
-                            )
-                        except:
-                            # If logo fails, send text
-                            info_msg = (
-                                f"🔗 {blockchain}\n"
-                                f"💎 {token_info['name']} (${token_info['symbol']})\n"
-                                f"💰 Mcap: {token_info['mcap']}"
-                            )
-                            await context.bot.send_message(chat_id=user_id, text=info_msg)
-                    else:
-                        # Send info without logo
-                        info_msg = (
-                            f"🔗 {blockchain}\n"
-                            f"💎 {token_info['name']} (${token_info['symbol']})\n"
-                            f"💰 Mcap: {token_info['mcap']}"
-                        )
-                        await context.bot.send_message(chat_id=user_id, text=info_msg)
-                    
-                    # Send CA for easy copying
-                    await context.bot.send_message(chat_id=user_id, text=ca)
-                    
-                    # Send chart link
-                    if token_info.get('chart'):
-                        await context.bot.send_message(
-                            chat_id=user_id,
-                            text=f"📊 [View Chart]({token_info['chart']})",
-                            parse_mode='Markdown'
-                        )
-                else:
-                    # If no token info, send blockchain + CA together
-                    await context.bot.send_message(chat_id=user_id, text=f"🔗 {blockchain}")
-                    await context.bot.send_message(chat_id=user_id, text=ca)
-                
-                # Retry logic for sending messages
-                max_retries = 3
-                for attempt in range(max_retries):
-                    try:
-                        await context.bot.send_message(chat_id=user_id, text=ca_text)
-                        break
-                    except RetryAfter as e:
-                        print(f"Rate limited, waiting {e.retry_after} seconds...")
-                        time.sleep(e.retry_after)
-                    except TimedOut:
-                        print(f"Timeout on attempt {attempt + 1}, retrying...")
-                        if attempt < max_retries - 1:
-                            time.sleep(2)
-                        else:
-                            raise
-            
-            print(f"✅ Message sent to {user_id} successfully!")
-        except TelegramError as e:
-            print(f"❌ Error forwarding to {user_id}: {e}")
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Help command"""
-    await start(update, context)
-
-def main():
-    """Start the bot"""
-    # Load tracked users from storage
-    load_tracked_users()
-    load_wallets()
-    load_autobuy_settings()
-    
-    app = Application.builder().token(TOKEN).build()
-    
-    # Add handlers
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("track", track_user))
-    app.add_handler(CommandHandler("untrack", untrack_user))
-    app.add_handler(CommandHandler("list", list_tracked))
-    app.add_handler(CommandHandler("wallet", wallet))
-    app.add_handler(CommandHandler("balance", balance))
-    app.add_handler(CommandHandler("autobuy", autobuy_command))
-    app.add_handler(CommandHandler("leaderboard", leaderboard_command))
-    app.add_handler(CallbackQueryHandler(handle_menu_callback, pattern="^menu_"))
-    app.add_handler(CallbackQueryHandler(handle_autobuy_callback, pattern="^ab_"))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    # Start bot with better error handling
-    print("Bot started...")
-    print(f"⚠️  ENCRYPTION KEY: {ENCRYPTION_KEY.decode() if isinstance(ENCRYPTION_KEY, bytes) else ENCRYPTION_KEY}")
-    print("⚠️  SAVE THIS KEY! Without it, you cannot recover wallets!")
-    app.run_polling(
-        allowed_updates=["message"],
-        drop_pending_updates=False
-    )
-
-if __name__ == "__main__":
-    main()
+    if user_

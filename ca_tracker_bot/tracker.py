@@ -28,7 +28,7 @@ FEE_WALLET = "BXTasZ9F4TVvgvcscE42d7RwLDZ127i4gPwUuGMB8wjS"  # Your fee collecti
 FEE_PERCENTAGE = 0.5  # 0.5% fee per trade (adjustable: 0.5 - 2.0)
 
 # Encryption
-ENCRYPTION_KEY = os.getenv('WALLET_ENCRYPTION_KEY', Fernet.generate_key())
+ENCRYPTION_KEY = "ylGgy0aCCXZSFkHPbid6QV3Gfmw0zWK0HR4DbnkJoKk="
 if isinstance(ENCRYPTION_KEY, str):
     ENCRYPTION_KEY = ENCRYPTION_KEY.encode()
 cipher = Fernet(ENCRYPTION_KEY)

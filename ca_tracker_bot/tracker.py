@@ -296,8 +296,13 @@ async def execute_withdrawal(user_id, amount_sol, destination_address):
         return str(result.value), None
         
     except Exception as e:
-        print(f"Withdrawal error: {e}")
-        return None, str(e)
+        import traceback
+        error_detail = traceback.format_exc()
+        print(f"❌ WITHDRAWAL ERROR DETAILS:")
+        print(f"Error type: {type(e).__name__}")
+        print(f"Error message: {str(e)}")
+        print(f"Full traceback:\n{error_detail}")
+        return None, f"{type(e).__name__}: {str(e)}"
 
 def save_positions():
     """Save positions"""

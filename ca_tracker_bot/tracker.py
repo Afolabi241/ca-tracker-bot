@@ -27,11 +27,9 @@ JUPITER_API = "https://quote-api.jup.ag/v6"
 FEE_WALLET = "BXTasZ9F4TVvgvcscE42d7RwLDZ127i4gPwUuGMB8wjS"  # Your fee collection wallet
 FEE_PERCENTAGE = 0.5  # 0.5% fee per trade (adjustable: 0.5 - 2.0)
 
-# Encryption
+# Encryption - USE YOUR SAVED KEY
 ENCRYPTION_KEY = "ylGgy0aCCXZSFkHPbid6QV3Gfmw0zWK0HR4DbnkJoKk="
-if isinstance(ENCRYPTION_KEY, str):
-    ENCRYPTION_KEY = ENCRYPTION_KEY.encode()
-cipher = Fernet(ENCRYPTION_KEY)
+cipher = Fernet(ENCRYPTION_KEY.encode())
 
 # Files
 STORAGE_FILE = 'tracked_users.json'
@@ -49,7 +47,7 @@ MIN_SLIPPAGE = 1
 
 # Storage
 tracked_users = {}
-user_wallets = {}  # Changed structure: {user_id: {'wallets': [{wallet1}, {wallet2}], 'active_wallet': 0}}
+user_wallets = {}
 autobuy_settings = {}
 user_positions = {}
 temp_autobuy_config = {}
@@ -84,135 +82,6 @@ def generate_solana_wallet():
     public_key = str(keypair.pubkey())
     return private_key, public_key
 
-def get_active_wallet(user_id):
-    """Get user's active wallet data"""
-    user_id = str(user_id)
-    if user_id not in user_wallets:
-        return None
-    
-    # Handle old format (single wallet) - migrate to new format
-    if 'encrypted_key' in user_wallets[user_id]:
-        # Old format, migrate
-        old_wallet = user_wallets[user_id]
-        user_wallets[user_id] = {
-            'wallets': [{
-                'id': 0,
-                'name': 'Wallet 1',
-                'encrypted_key': old_wallet['encrypted_key'],
-                'address': old_wallet['address'],
-                'balance': old_wallet.get('balance', 0.0)
-            }],
-            'active_wallet': 0
-        }
-        save_wallets()
-    
-    active_idx = user_wallets[user_id].get('active_wallet', 0)
-    wallets = user_wallets[user_id].get('wallets', [])
-    
-    if not wallets or active_idx >= len(wallets):
-        return None
-    
-    return wallets[active_idx]
-
-def get_all_wallets(user_id):
-    """Get all user's wallets"""
-    user_id = str(user_id)
-    if user_id not in user_wallets:
-        return []
-    
-    # Migrate old format if needed
-    get_active_wallet(user_id)
-    
-    return user_wallets[user_id].get('wallets', [])
-
-def add_wallet(user_id, name=None):
-    """Add new wallet for user"""
-    user_id = str(user_id)
-    
-    # Initialize if first wallet
-    if user_id not in user_wallets:
-        user_wallets[user_id] = {
-            'wallets': [],
-            'active_wallet': 0
-        }
-    
-    # Migrate old format if needed
-    get_active_wallet(user_id)
-    
-    # Generate new wallet
-    priv, pub = generate_solana_wallet()
-    enc = encrypt_key(priv)
-    
-    wallet_count = len(user_wallets[user_id]['wallets'])
-    
-    if name is None:
-        name = f"Wallet {wallet_count + 1}"
-    
-    new_wallet = {
-        'id': wallet_count,
-        'name': name,
-        'encrypted_key': enc,
-        'address': pub,
-        'balance': 0.0
-    }
-    
-    user_wallets[user_id]['wallets'].append(new_wallet)
-    save_wallets()
-    
-    return new_wallet
-
-def switch_wallet(user_id, wallet_id):
-    """Switch active wallet"""
-    user_id = str(user_id)
-    
-    if user_id not in user_wallets:
-        return False
-    
-    wallets = user_wallets[user_id].get('wallets', [])
-    
-    if wallet_id < 0 or wallet_id >= len(wallets):
-        return False
-    
-    user_wallets[user_id]['active_wallet'] = wallet_id
-    save_wallets()
-    
-    return True
-
-def delete_wallet(user_id, wallet_id):
-    """Delete a wallet"""
-    user_id = str(user_id)
-    
-    if user_id not in user_wallets:
-        return False
-    
-    wallets = user_wallets[user_id].get('wallets', [])
-    
-    # Can't delete if only one wallet
-    if len(wallets) <= 1:
-        return False
-    
-    # Can't delete active wallet
-    if wallet_id == user_wallets[user_id].get('active_wallet', 0):
-        return False
-    
-    if wallet_id < 0 or wallet_id >= len(wallets):
-        return False
-    
-    # Remove wallet
-    del wallets[wallet_id]
-    
-    # Reindex wallet IDs
-    for i, wallet in enumerate(wallets):
-        wallet['id'] = i
-    
-    # Adjust active wallet index if needed
-    active = user_wallets[user_id].get('active_wallet', 0)
-    if active >= len(wallets):
-        user_wallets[user_id]['active_wallet'] = len(wallets) - 1
-    
-    save_wallets()
-    return True
-
 def encrypt_key(key):
     """Encrypt"""
     return cipher.encrypt(key.encode()).decode()
@@ -233,12 +102,12 @@ async def get_sol_balance(address):
 async def execute_jupiter_swap(user_id, token_address, amount_sol, slippage=10):
     """Execute swap via Jupiter"""
     try:
-        # Get user's active wallet
-        wallet = get_active_wallet(user_id)
-        if not wallet:
+        # Get user wallet
+        if str(user_id) not in user_wallets:
             return None, "No wallet"
         
-        private_key = decrypt_key(wallet['encrypted_key'])
+        wallet_data = user_wallets[str(user_id)]
+        private_key = decrypt_key(wallet_data['encrypted_key'])
         
         # Create keypair from private key
         keypair = Keypair.from_bytes(base58.b58decode(private_key))
@@ -328,12 +197,12 @@ async def collect_fee(user_id, trade_amount_sol):
         if fee_amount < 0.0001:
             return None, "Fee too small"
         
-        # Get user's active wallet
-        wallet = get_active_wallet(user_id)
-        if not wallet:
+        # Get user wallet
+        if str(user_id) not in user_wallets:
             return None, "No wallet"
         
-        private_key = decrypt_key(wallet['encrypted_key'])
+        wallet_data = user_wallets[str(user_id)]
+        private_key = decrypt_key(wallet_data['encrypted_key'])
         keypair = Keypair.from_bytes(base58.b58decode(private_key))
         
         # Check balance
@@ -385,11 +254,11 @@ async def collect_fee(user_id, trade_amount_sol):
 async def execute_withdrawal(user_id, amount_sol, destination_address):
     """Execute SOL withdrawal"""
     try:
-        wallet = get_active_wallet(user_id)
-        if not wallet:
+        if str(user_id) not in user_wallets:
             return None, "No wallet found"
         
-        private_key = decrypt_key(wallet['encrypted_key'])
+        wallet_data = user_wallets[str(user_id)]
+        private_key = decrypt_key(wallet_data['encrypted_key'])
         keypair = Keypair.from_bytes(base58.b58decode(private_key))
         
         # Check balance
@@ -573,7 +442,7 @@ async def get_token_info(chain_id, address):
         return None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start with image"""
+    """Start with banner"""
     keyboard = [
         [
             InlineKeyboardButton("💰 Wallet", callback_data="menu_wallet"),
@@ -581,7 +450,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ],
         [
             InlineKeyboardButton("🎯 Auto-Snipe", callback_data="menu_autobuy"),
-            InlineKeyboardButton("📊 PnL", callback_data="menu_pnl")
+            InlineKeyboardButton("📋 Positions", callback_data="menu_positions")
         ],
         [
             InlineKeyboardButton("💸 Withdraw", callback_data="menu_withdraw"),
@@ -593,28 +462,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🤖 **CallTracker Auto-Snipe**\n\n"
         "⚡ Lightning-fast execution\n"
         "🎯 Track unlimited callers\n"
-        "💰 Multiple wallet support\n"
-        "📊 Real-time PnL tracking\n\n"
+        "💰 Secure wallet system\n\n"
         "⚠️ **Risk Warning:**\n"
         "Trading crypto is high risk. Only invest what you can afford to lose.\n\n"
         "Select an option below:"
     )
     
-    # Try to send with image (bot logo/banner)
+    # Try to send with banner image
     try:
         await update.message.reply_photo(
-            photo="https://i.imgur.com/BzdzJON.png",  # Your CallTracker banner
+            photo="https://i.imgur.com/BzdzJON.png",
             caption=text,
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode='Markdown'
         )
     except:
-        # Fallback if image fails
-        await update.message.reply_text(
-            text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='Markdown'
-        )
+        # Fallback to text if image fails
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
 async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Menu handler"""
@@ -714,40 +578,6 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             f"Example: 0.5\n\n"
             f"Or send /cancel to cancel",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="withdraw_cancel")]])
-        )
-    
-    elif action == 'pnl':
-        if user_id not in user_positions or not user_positions[user_id]:
-            await query.edit_message_text(
-                "📊 No trades yet!\n\nStart trading to see your PnL",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="menu_back")]])
-            )
-            return
-        
-        # Calculate PnL
-        total_invested = 0.0
-        total_trades = len(user_positions[user_id])
-        
-        for pos in user_positions[user_id]:
-            total_invested += pos.get('amount_sol', 0)
-        
-        # Simple PnL display (would need current prices for real PnL)
-        text = (
-            f"📊 **Your Trading Stats**\n\n"
-            f"💰 Total Invested: {total_invested:.4f} SOL\n"
-            f"📈 Total Trades: {total_trades}\n"
-            f"🎯 Avg Trade Size: {total_invested/total_trades if total_trades > 0 else 0:.4f} SOL\n\n"
-            f"🔸 Recent Trades:\n"
-        )
-        
-        for i, pos in enumerate(user_positions[user_id][-5:], 1):
-            text += f"\n{i}. {pos.get('amount_sol', 0)} SOL\n"
-            text += f"   {pos.get('token_address', '')[:8]}...\n"
-        
-        await query.edit_message_text(
-            text,
-            parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="menu_back")]])
         )
     
     elif action == 'positions':
@@ -1192,9 +1022,8 @@ async def handle_autobuy_callback(update: Update, context: ContextTypes.DEFAULT_
         save_autobuy_settings()
         del temp_autobuy_config[user_id]
         
-        # Calculate estimated fees (hide bot fee)
+        # Don't show fees to user
         amount = cfg['amount']
-        # Don't calculate or show bot fee to users
         
         mcap_display = f"${cfg['max_mcap']:,}" if cfg['max_mcap'] < 999999999 else "No Limit"
         
@@ -1677,19 +1506,23 @@ async def check_and_execute_autobuy(uid, trader, ca, token_info, context):
     tx_sig, error = await execute_jupiter_swap(user_id, ca, amount, cfg.get('slippage', 10))
     
     if tx_sig:
-        # Collect fee after successful trade (silent - don't show to user)
+        # Collect fee after successful trade
         fee_tx, fee_error = await collect_fee(user_id, amount)
         
-        # Don't show fee to users
+        fee_status = ""
+        if fee_tx:
+            fee_status = f"\n💸 Fee collected: {fee_amount:.4f} SOL"
+        elif fee_error and fee_error not in ["Fee wallet not set", "Fee disabled", "Fee too small"]:
+            fee_status = f"\n⚠️ Fee collection pending"
         
         await context.bot.send_message(
             uid,
-            f"✅ **SNIPE SUCCESSFUL!**\n\n"
+            f"✅ SNIPE SUCCESSFUL!\n\n"
             f"💰 Amount: {amount} SOL\n"
             f"🎯 Token: {token_info.get('symbol', 'Unknown') if token_info else 'Unknown'}\n"
             f"📊 Mcap: {token_info.get('mcap', 'N/A') if token_info else 'N/A'}\n"
             f"🔻 Stop Loss: -{cfg['stoploss']}%\n"
-            f"🔺 Take Profit: +{cfg['takeprofit']}%\n\n"
+            f"🔺 Take Profit: +{cfg['takeprofit']}%{fee_status}\n\n"
             f"TX: `{tx_sig[:16]}...`\n\n"
             f"[View on Solscan](https://solscan.io/tx/{tx_sig})",
             parse_mode='Markdown'
@@ -1709,113 +1542,47 @@ async def check_and_execute_autobuy(uid, trader, ca, token_info, context):
         )
 
 async def wallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Multi-wallet management"""
+    """Wallet cmd"""
     user_id = str(update.effective_user.id)
     
-    # Check if user has wallets
-    wallets = get_all_wallets(user_id)
-    
-    if not wallets:
-        # Create first wallet
-        wallet = add_wallet(user_id, "Main Wallet")
+    if user_id not in user_wallets:
+        priv, pub = generate_solana_wallet()
+        enc = encrypt_key(priv)
+        user_wallets[user_id] = {
+            'encrypted_key': enc,
+            'address': pub,
+            'balance': 0.0
+        }
+        save_wallets()
         await update.message.reply_text(
-            f"✅ **First Wallet Created!**\n\n"
-            f"💳 Address:\n`{wallet['address']}`\n\n"
-            f"⬇️ Send SOL to this address\n\n"
-            f"**Commands:**\n"
-            f"/wallets - View all wallets\n"
-            f"/wallet create - Create new wallet\n"
-            f"/balance - Check balance",
+            f"✅ Wallet Created!\n\n💳 `{pub}`\n\n⬇️ Send SOL to this address\n\nUse /balance to check",
             parse_mode='Markdown'
         )
-        return
-    
-    # Show active wallet
-    active = get_active_wallet(user_id)
-    bal = await get_sol_balance(active['address'])
-    active['balance'] = bal
-    save_wallets()
-    
-    keyboard = [
-        [
-            InlineKeyboardButton("💳 All Wallets", callback_data="wallets_list"),
-            InlineKeyboardButton("➕ Create New", callback_data="wallet_create")
-        ],
-        [
-            InlineKeyboardButton("🔑 Export Key", callback_data=f"wallet_export_{active['id']}"),
-            InlineKeyboardButton("🔄 Refresh", callback_data="wallet_refresh")
-        ]
-    ]
-    
-    await update.message.reply_text(
-        f"💰 **{active['name']}** (Active)\n\n"
-        f"Balance: {bal:.4f} SOL\n\n"
-        f"💳 Address:\n`{active['address']}`",
-        parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def wallets_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """List all wallets"""
-    user_id = str(update.effective_user.id)
-    wallets = get_all_wallets(user_id)
-    
-    if not wallets:
-        await update.message.reply_text("❌ No wallets. Use /wallet to create one")
-        return
-    
-    active_idx = user_wallets[user_id].get('active_wallet', 0)
-    
-    text = "💳 **Your Wallets:**\n\n"
-    keyboard = []
-    
-    for wallet in wallets:
-        is_active = "✅" if wallet['id'] == active_idx else "⚪"
-        bal = await get_sol_balance(wallet['address'])
-        wallet['balance'] = bal
-        
-        text += f"{is_active} **{wallet['name']}**\n"
-        text += f"   {bal:.4f} SOL\n"
-        text += f"   `{wallet['address'][:8]}...{wallet['address'][-8:]}`\n\n"
-        
-        # Add buttons
-        row = []
-        if wallet['id'] != active_idx:
-            row.append(InlineKeyboardButton(f"Use {wallet['name']}", callback_data=f"wallet_switch_{wallet['id']}"))
-        row.append(InlineKeyboardButton("🔑", callback_data=f"wallet_export_{wallet['id']}"))
-        if len(wallets) > 1 and wallet['id'] != active_idx:
-            row.append(InlineKeyboardButton("🗑️", callback_data=f"wallet_delete_{wallet['id']}"))
-        
-        keyboard.append(row)
-    
-    keyboard.append([InlineKeyboardButton("➕ Create New Wallet", callback_data="wallet_create")])
-    
-    save_wallets()
-    
-    await update.message.reply_text(
-        text,
-        parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    else:
+        addr = user_wallets[user_id]['address']
+        bal = await get_sol_balance(addr)
+        user_wallets[user_id]['balance'] = bal
+        save_wallets()
+        await update.message.reply_text(
+            f"💳 Your Wallet\n\n`{addr}`\n\nBalance: {bal:.4f} SOL",
+            parse_mode='Markdown'
+        )
 
 async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Balance cmd"""
     user_id = str(update.effective_user.id)
     
-    wallet = get_active_wallet(user_id)
-    if not wallet:
+    if user_id not in user_wallets:
         await update.message.reply_text("❌ No wallet. Use /wallet")
         return
     
-    addr = wallet['address']
+    addr = user_wallets[user_id]['address']
     bal = await get_sol_balance(addr)
-    wallet['balance'] = bal
+    user_wallets[user_id]['balance'] = bal
     save_wallets()
     
     await update.message.reply_text(
-        f"💰 **{wallet['name']}** Balance\n\n"
-        f"{bal:.4f} SOL\n\n"
-        f"💳 `{addr}`",
+        f"💰 Balance: {bal:.4f} SOL\n\n💳 `{addr}`",
         parse_mode='Markdown'
     )
 
@@ -1895,180 +1662,6 @@ async def handle_withdraw_callback(update: Update, context: ContextTypes.DEFAULT
             del withdraw_requests[user_id]
         await query.edit_message_text("❌ Withdrawal cancelled")
 
-async def handle_wallet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle wallet management callbacks"""
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = str(update.effective_user.id)
-    data = query.data
-    
-    if data == "wallets_list":
-        # Show all wallets
-        wallets = get_all_wallets(user_id)
-        active_idx = user_wallets[user_id].get('active_wallet', 0)
-        
-        text = "💳 **Your Wallets:**\n\n"
-        keyboard = []
-        
-        for wallet in wallets:
-            is_active = "✅" if wallet['id'] == active_idx else "⚪"
-            bal = await get_sol_balance(wallet['address'])
-            wallet['balance'] = bal
-            
-            text += f"{is_active} **{wallet['name']}**\n"
-            text += f"   {bal:.4f} SOL\n"
-            text += f"   `{wallet['address'][:8]}...{wallet['address'][-8:]}`\n\n"
-            
-            row = []
-            if wallet['id'] != active_idx:
-                row.append(InlineKeyboardButton(f"Use {wallet['name']}", callback_data=f"wallet_switch_{wallet['id']}"))
-            row.append(InlineKeyboardButton("🔑", callback_data=f"wallet_export_{wallet['id']}"))
-            if len(wallets) > 1 and wallet['id'] != active_idx:
-                row.append(InlineKeyboardButton("🗑️", callback_data=f"wallet_delete_{wallet['id']}"))
-            
-            keyboard.append(row)
-        
-        keyboard.append([InlineKeyboardButton("➕ Create New", callback_data="wallet_create")])
-        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="wallet_refresh")])
-        
-        save_wallets()
-        await query.edit_message_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
-    
-    elif data == "wallet_create":
-        # Create new wallet
-        wallet_count = len(get_all_wallets(user_id))
-        wallet = add_wallet(user_id, f"Wallet {wallet_count + 1}")
-        
-        await query.edit_message_text(
-            f"✅ **New Wallet Created!**\n\n"
-            f"💳 {wallet['name']}\n"
-            f"Address: `{wallet['address']}`\n\n"
-            f"Use /wallets to manage all wallets",
-            parse_mode='Markdown'
-        )
-    
-    elif data == "wallet_refresh":
-        # Refresh active wallet display
-        active = get_active_wallet(user_id)
-        bal = await get_sol_balance(active['address'])
-        active['balance'] = bal
-        save_wallets()
-        
-        keyboard = [
-            [
-                InlineKeyboardButton("💳 All Wallets", callback_data="wallets_list"),
-                InlineKeyboardButton("➕ Create New", callback_data="wallet_create")
-            ],
-            [
-                InlineKeyboardButton("🔑 Export Key", callback_data=f"wallet_export_{active['id']}"),
-                InlineKeyboardButton("🔄 Refresh", callback_data="wallet_refresh")
-            ]
-        ]
-        
-        await query.edit_message_text(
-            f"💰 **{active['name']}** (Active)\n\n"
-            f"Balance: {bal:.4f} SOL\n\n"
-            f"💳 Address:\n`{active['address']}`",
-            parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-    
-    elif data.startswith("wallet_switch_"):
-        wallet_id = int(data.split("_")[2])
-        
-        if switch_wallet(user_id, wallet_id):
-            await query.answer("✅ Wallet switched!")
-            
-            # Show new active wallet
-            active = get_active_wallet(user_id)
-            bal = await get_sol_balance(active['address'])
-            active['balance'] = bal
-            save_wallets()
-            
-            keyboard = [
-                [
-                    InlineKeyboardButton("💳 All Wallets", callback_data="wallets_list"),
-                    InlineKeyboardButton("➕ Create New", callback_data="wallet_create")
-                ],
-                [
-                    InlineKeyboardButton("🔑 Export Key", callback_data=f"wallet_export_{active['id']}"),
-                    InlineKeyboardButton("🔄 Refresh", callback_data="wallet_refresh")
-                ]
-            ]
-            
-            await query.edit_message_text(
-                f"💰 **{active['name']}** (Active)\n\n"
-                f"Balance: {bal:.4f} SOL\n\n"
-                f"💳 Address:\n`{active['address']}`",
-                parse_mode='Markdown',
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-        else:
-            await query.answer("❌ Failed to switch wallet", show_alert=True)
-    
-    elif data.startswith("wallet_export_"):
-        wallet_id = int(data.split("_")[2])
-        wallets = get_all_wallets(user_id)
-        
-        if wallet_id < len(wallets):
-            wallet = wallets[wallet_id]
-            private_key = decrypt_key(wallet['encrypted_key'])
-            
-            # Send private key in a separate message that can be deleted
-            await context.bot.send_message(
-                user_id,
-                f"🔑 **{wallet['name']} Private Key**\n\n"
-                f"⚠️ **KEEP THIS SECRET!**\n"
-                f"Anyone with this key controls your funds!\n\n"
-                f"`{private_key}`\n\n"
-                f"💡 Import this into Phantom/Solflare\n"
-                f"🗑️ Delete this message after saving!",
-                parse_mode='Markdown'
-            )
-            
-            await query.answer("✅ Private key sent! Check messages above. DELETE IT after saving!", show_alert=True)
-        else:
-            await query.answer("❌ Wallet not found", show_alert=True)
-    
-    elif data.startswith("wallet_delete_"):
-        wallet_id = int(data.split("_")[2])
-        
-        if delete_wallet(user_id, wallet_id):
-            await query.answer("✅ Wallet deleted!")
-            
-            # Refresh wallet list
-            wallets = get_all_wallets(user_id)
-            active_idx = user_wallets[user_id].get('active_wallet', 0)
-            
-            text = "💳 **Your Wallets:**\n\n"
-            keyboard = []
-            
-            for wallet in wallets:
-                is_active = "✅" if wallet['id'] == active_idx else "⚪"
-                bal = await get_sol_balance(wallet['address'])
-                wallet['balance'] = bal
-                
-                text += f"{is_active} **{wallet['name']}**\n"
-                text += f"   {bal:.4f} SOL\n"
-                text += f"   `{wallet['address'][:8]}...{wallet['address'][-8:]}`\n\n"
-                
-                row = []
-                if wallet['id'] != active_idx:
-                    row.append(InlineKeyboardButton(f"Use {wallet['name']}", callback_data=f"wallet_switch_{wallet['id']}"))
-                row.append(InlineKeyboardButton("🔑", callback_data=f"wallet_export_{wallet['id']}"))
-                if len(wallets) > 1 and wallet['id'] != active_idx:
-                    row.append(InlineKeyboardButton("🗑️", callback_data=f"wallet_delete_{wallet['id']}"))
-                
-                keyboard.append(row)
-            
-            keyboard.append([InlineKeyboardButton("➕ Create New", callback_data="wallet_create")])
-            
-            save_wallets()
-            await query.edit_message_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
-        else:
-            await query.answer("❌ Can't delete active wallet or last wallet!", show_alert=True)
-
 def main():
     """Main"""
     print("🚀 CallTracker Auto-Snipe v2.0 ENHANCED + FEE COLLECTION")
@@ -2091,14 +1684,12 @@ def main():
     app.add_handler(CommandHandler("list", list_tracked))
     app.add_handler(CommandHandler("chatid", get_chat_id))
     app.add_handler(CommandHandler("wallet", wallet_command))
-    app.add_handler(CommandHandler("wallets", wallets_command))
     app.add_handler(CommandHandler("balance", balance_command))
     app.add_handler(CommandHandler("withdraw", withdraw_command))
     app.add_handler(CommandHandler("cancel", cancel_command))
     app.add_handler(CommandHandler("autobuy", autobuy_command))
     app.add_handler(CallbackQueryHandler(handle_menu_callback, pattern="^menu_"))
     app.add_handler(CallbackQueryHandler(handle_autobuy_callback, pattern="^ab_"))
-    app.add_handler(CallbackQueryHandler(handle_wallet_callback, pattern="^wallet"))
     app.add_handler(CallbackQueryHandler(handle_withdraw_callback, pattern="^withdraw_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
